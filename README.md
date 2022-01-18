@@ -15,8 +15,11 @@ So 2 microservices has been developed for backend.
 Authentication has been implemented in Angular SSO using Azure.
 Authorization has been implemented using Azure AD Identity server
 
-Run the ECS-Microservices.yml in AWS cloudformation by providing proper parameters. This template will create following AWS resources
+Run the ECS-Microservices.yml in AWS cloudformation by providing proper parameters. 
+This template refers some ParameterStore and SecretManager resources created already in AWS. Update the parameters based on requirement.
+To create ParameterStore and SecretManager, refer AWS-ParameterStore-CFT repository.
 
+This template will create following AWS resources
 1. IAM Roles
 2. ECS Task definition
 3. Container Security Group
@@ -29,3 +32,5 @@ Run the ECS-Microservices.yml in AWS cloudformation by providing proper paramete
 10. ECS Task definition
 11. Auto scaling policy
 12. Log group in cloudwatch
+
+Refer Architecture diagram to check the resources created by running this template
