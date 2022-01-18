@@ -1,0 +1,776 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create ECS Fargate & Loadbalancer Resources
+
+Parameters:
+  Port:
+    Type: Number
+    Default: 80
+  VpcId:
+    Type: String
+    Default: <Enter your vpc>
+  PrivateSubnet1:
+    Type: String
+    Default: <Enter your subnet>
+  PrivateSubnet2:
+    Type: String
+    Default: <Enter your subnet>
+  AppName:
+    Type: String
+    Default: CAD
+    Description: Application name for the service
+  ServiceNameui:
+    Type: String
+    Default: ui-service
+    Description: A name for the service
+  ServiceNamewebApi1:
+    Type: String
+    Default: DashBoardservice
+    Description: A name for the web api service 
+  ServiceNamewebApi2:
+    Type: String
+    Default: Adminservice
+    Description: A name for the web api service   
+   
+  ImageUrlui:
+    Type: String
+    Default: <ECR Image URI>
+  ImageUrlwebApi1:
+    Type: String
+    Default: <ECR Image URI>
+    Description:
+      The url of a docker image that contains the application process that
+      will handle the traffic for this service
+  ImageUrlwebApi2:
+    Type: String
+    Default: <ECR Image URI>
+    Description:
+      The url of a docker image that contains the application process that
+      will handle the traffic for this service    
+  ContainerPortUI:
+    Type: Number
+    Default: 80
+  ContainerCpuUI:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemoryUI:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+  ContainerPortwebApi1:
+    Type: Number
+    Default: 80  
+  ContainerCpuwebApi1:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemorywebApi1:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+  ContainerPortwebApi2:
+    Type: Number
+    Default: 80   
+  ContainerCpuwebApi2:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemorywebApi2:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container    
+  Path:
+    Type: String
+    Default: "*"
+    Description: A path on the public load balancer that this service
+      should be connected to. Use * to send all load balancer
+      traffic to this service.
+  Priority:
+    Type: Number
+    Default: 1
+    Description: The priority for the routing rule added to the load balancer.
+      This only applies if your have multiple services which have been
+      assigned to different paths on the load balancer.
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: How many copies of the service task to run
+  Role:
+    Type: String
+    Default: ""
+    Description:
+      (Optional) An IAM role to give the service's containers if the code within needs to
+      access other AWS resources like S3 buckets, DynamoDB tables, etc
+  HealthCheckPathui:
+    Type: String
+    Default: / 
+  HealthCheckPathwebApi1:
+    Type: String
+    Default: /<API 1 endpoint healthcheck>
+  HealthCheckPathwebApi2:
+    Type: String
+    Default: /<API 2 endpoint healthcheck> 
+  
+  LoadBalancerHTTPPort:
+    Type: Number
+    Default: 80
+  LoadBalancerHTTPSPort:
+    Type: Number
+    Default: 443
+  CertificateArn:
+    Type: String
+    Default: <CertificateARN>
+  # for autoscaling
+  MinContainers:
+    Type: Number
+    Default: 2
+  # for autoscaling
+  MaxContainers:
+    Type: Number
+    Default: 10
+  # target CPU utilization (%)
+  AutoScalingTargetValue:
+    Type: Number
+    Default: 50
+  SSMSecretManagerARN:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: ARN of secret manager which stores username and password of postgres database
+    Default: CAD-SercetManagerARN
+    AllowedValues:
+      - CAD-SercetManagerARN
+  SSMBucketName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: S3 bucketname where we will save all the objects
+    Default: CAD-BucketName
+    AllowedValues:
+      - CAD-BucketName
+  SSMBucketRegion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: S3 bucketname region
+    Default: CAD-BucketRegion
+    AllowedValues:
+      - CAD-BucketRegion  
+      
+Conditions:
+  HasCustomRole: !Not [!Equals [!Ref "Role", ""]]
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Join ["", [!Ref AppName, "-ecs-cluster"]]
+      #ClusterName: !Ref ECSClusterName
+      
+  #region Roles
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["", [!Ref AppName, -ecs-tdef-ExecRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"  
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["", [!Ref AppName, -ecs-tdef-TaskRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonECS_FullAccess"
+        - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["", [!Ref AppName, -ECS-service-auto-scaling-role]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: !Join ["", [!Ref AppName, -ECS-service-auto-scaling-policy]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - cloudwatch:PutMetricAlarm
+                  - application-autoscaling:*
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:GetMetricStatistics
+                Resource:
+                  - "*"      
+  #endregion
+  
+  #region Frontend
+  ECSTaskDefinitionui:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroupui
+    Properties:
+      ContainerDefinitions:
+        - Name: !Join ['', [!Ref AppName, !Ref ServiceNameui, container]]
+          Image: !Ref ImageUrlui
+          PortMappings:
+            - ContainerPort: !Ref ContainerPortUI              
+          # Setting to stop the task if the container fails
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroupui
+              awslogs-stream-prefix: ecs
+      Cpu: !Ref ContainerCpuUI
+      # A role needed by ECS.
+      # "The ARN of the task execution role that containers in this task can assume. All containers in this task are granted the permissions that are specified in this role."
+      # "There is an optional task execution IAM role that you can specify with Fargate to allow your Fargate tasks to make API calls to Amazon ECR."
+      ExecutionRoleArn: !Ref ExecutionRole
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that grants containers in the task permission to call AWS APIs on your behalf."
+      TaskRoleArn: !Ref TaskRole
+      Family: !Join ["", [!Ref ServiceNameui, TaskDefinitionui]]
+      Memory: !Ref ContainerMemoryUI
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+ 
+  ContainerSecurityGroupUI:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ["", [!Ref AppName, "-ecs-cluster", ContainerSGui]]
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPortUI
+          ToPort: !Ref ContainerPortUI
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroupUI
+  
+  LoadBalancerSecurityGroupUI:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        !Join ["", [!Ref AppName, ALBSGui]]
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref LoadBalancerHTTPPort
+          ToPort: !Ref LoadBalancerHTTPPort
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: !Ref LoadBalancerHTTPSPort
+          ToPort: !Ref LoadBalancerHTTPSPort
+          CidrIp: 0.0.0.0/0  
+  
+  LoadBalancerui:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join ["", [!Ref AppName, ALBui]]
+      Scheme: internal
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroupUI
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+  
+  LoadBalancerHttpListenerui:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancerui
+      - TargetGroupui      
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerui
+      Port: !Ref LoadBalancerHTTPPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupui
+  
+  LoadBalancerHttpsListenerui:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancerui
+      - TargetGroupui      
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerui
+      Port: !Ref LoadBalancerHTTPSPort
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupui
+  TargetGroupui:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ["", [!Ref AppName, !Ref ServiceNameui, TGui]]
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPortUI
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckIntervalSeconds: 10
+      # will look for a 200 status code by default unless specified otherwise
+      HealthCheckPath: !Ref HealthCheckPathui
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300  
+  ECSServiceui:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ECSCluster
+      - ECSTaskDefinitionui
+      - ContainerSecurityGroupUI
+      - TargetGroupui
+      - LoadBalancerHttpListenerui 
+      - LoadBalancerHttpsListenerui     
+    Properties:
+      ServiceName: !Ref ServiceNameui
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinitionui
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroupUI
+      LoadBalancers:
+        - ContainerName: !Join ['', [!Ref ServiceNameui, container]]
+          ContainerPort: !Ref ContainerPortUI
+          TargetGroupArn: !Ref TargetGroupui
+  ScalableTargetui:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - "AutoScalingRole"
+      - "ECSServiceui"
+    Properties:
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ResourceId:
+        !Join [
+          "",
+          [service/, !Ref AppName, "-ecs-cluster", /, !Ref ServiceNameui],
+        ]
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: 1
+      MaxCapacity: 5
+
+  ScalingPolicyui:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - "ScalableTargetui"
+    Properties:
+      PolicyName:
+        !Join ["", [!Ref AppName, !Ref ServiceNameui, -ecs-auto-scaling-policy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTargetui
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 75.0  
+  LogGroupui:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ["", [/ecs/, !Ref AppName, !Ref ServiceNameui, Tdefui]]  
+  #endregion
+  
+  #region Loadbalancer
+  LoadBalancerwebApi:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join ["", [!Ref AppName, ALBwebApi]]
+      Scheme: internal
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroupwebApi
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        
+  LoadBalancerListenerwebApi:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancerwebApi
+      - TargetGroupwebApi1
+      - TargetGroupwebApi2
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerwebApi
+      Port: !Ref LoadBalancerHTTPPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupwebApi1
+  LoadBalancerHttpsListenerwebApi:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancerwebApi
+      - TargetGroupwebApi1
+      - TargetGroupwebApi2
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerwebApi
+      Port: !Ref LoadBalancerHTTPSPort
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupwebApi1        
+  LoadBalancerSecurityGroupwebApi:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        !Join ["", [!Ref AppName, ALBSGwebApi]]
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref LoadBalancerHTTPPort
+          ToPort: !Ref LoadBalancerHTTPPort
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: !Ref LoadBalancerHTTPSPort
+          ToPort: !Ref LoadBalancerHTTPSPort
+          CidrIp: 0.0.0.0/0  
+  
+  #endregion
+  
+  #region RequestDetail
+  ECSTaskDefinitionwebApi1:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroupwebApi1
+    Properties:
+      ContainerDefinitions:
+        - Name: !Join ['', [!Ref AppName, !Ref ServiceNamewebApi1, container]]
+          Image: !Ref ImageUrlwebApi1
+          PortMappings:
+            - ContainerPort: !Ref ContainerPortwebApi1
+              
+          # Setting to stop the task if the container fails
+          Essential: true
+          Environment:    
+          - Name: "SecretManagerArn"
+            Value: !Ref SSMSecretManagerARN
+          - Name: "Region"
+            Value: !Ref AWS::Region
+          - Name: "s3Settings:BucketName"
+            Value: !Ref SSMBucketName
+          - Name: "s3Settings:Region"
+            Value: !Ref SSMBucketRegion
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroupwebApi1
+              awslogs-stream-prefix: ecs
+      Cpu: 256
+      # A role needed by ECS.
+      # "The ARN of the task execution role that containers in this task can assume. All containers in this task are granted the permissions that are specified in this role."
+      # "There is an optional task execution IAM role that you can specify with Fargate to allow your Fargate tasks to make API calls to Amazon ECR."
+      ExecutionRoleArn: !Ref ExecutionRole
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that grants containers in the task permission to call AWS APIs on your behalf."
+      TaskRoleArn: !Ref TaskRole
+      Family: !Join ["", [!Ref ServiceNamewebApi1, TaskDefinitionwebApi1]]
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+  
+  ContainerSecurityGroupwebApi1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ["", [!Ref AppName, "-ecs-cluster", ContainerSGwebApi1]]
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPortwebApi1
+          ToPort: !Ref ContainerPortwebApi1
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroupwebApi
+  ListenerRule1:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    DependsOn:
+      - LoadBalancerListenerwebApi
+      - TargetGroupwebApi1
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupwebApi1                     
+      ListenerArn: !Ref LoadBalancerListenerwebApi
+      Priority: 1
+      Conditions: 
+        - Field: path-pattern
+          Values:
+            - /RequestService 
+  ECSServicewebApi1:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ECSCluster
+      - ECSTaskDefinitionwebApi1
+      - ContainerSecurityGroupwebApi1
+      - TargetGroupwebApi1
+      - LoadBalancerListenerwebApi
+      - LoadBalancerHttpsListenerwebApi
+      - ListenerRule1
+      
+    Properties:
+      ServiceName: !Ref ServiceNamewebApi1
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinitionwebApi1
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroupwebApi1
+      LoadBalancers:
+        - ContainerName: !Join ['', [!Ref ServiceNamewebApi1, container]]
+          ContainerPort: !Ref ContainerPortwebApi1
+          TargetGroupArn: !Ref TargetGroupwebApi1
+          
+  ScalableTargetwebApi1:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - "AutoScalingRole"
+      - "ECSServicewebApi1"
+    Properties:
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ResourceId:
+        !Join [
+          "",
+          [service/, !Ref AppName, "-ecs-cluster", /, !Ref ServiceNamewebApi1],
+        ]
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: 1
+      MaxCapacity: 5
+  
+  ScalingPolicywebApi1:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - "ScalableTargetwebApi1"
+    Properties:
+      PolicyName:
+        !Join ["", [!Ref AppName, !Ref ServiceNamewebApi1, -ecs-auto-scaling-policy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTargetwebApi1
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 75.0  
+  
+  TargetGroupwebApi1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ["", [!Ref AppName, !Ref ServiceNamewebApi1, TGwebApi1]]
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPortwebApi1
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckIntervalSeconds: 10
+      # will look for a 200 status code by default unless specified otherwise
+      HealthCheckPath: !Ref HealthCheckPathwebApi1
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300  
+  LogGroupwebApi1:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ["", [/ecs/, !Ref AppName, !Ref ServiceNamewebApi1, TdefwebApi1]] 
+  #endregion
+  
+  #region AdminKeyword
+  ECSTaskDefinitionwebApi2:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroupwebApi2
+    Properties:
+      ContainerDefinitions:
+        - Name: !Join ['', [!Ref AppName, !Ref ServiceNamewebApi2, container]]
+          Image: !Ref ImageUrlwebApi2
+          PortMappings:
+            - ContainerPort: !Ref ContainerPortwebApi2              
+          # Setting to stop the task if the container fails
+          Essential: true
+          Environment:    
+          - Name: "SecretManagerArn"
+            Value: !Ref SSMSecretManagerARN
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroupwebApi2
+              awslogs-stream-prefix: ecs
+      Cpu: 256
+      # A role needed by ECS.
+      # "The ARN of the task execution role that containers in this task can assume. All containers in this task are granted the permissions that are specified in this role."
+      # "There is an optional task execution IAM role that you can specify with Fargate to allow your Fargate tasks to make API calls to Amazon ECR."
+      ExecutionRoleArn: !Ref ExecutionRole
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that grants containers in the task permission to call AWS APIs on your behalf."
+      TaskRoleArn: !Ref TaskRole
+      Family: !Join ["", [!Ref ServiceNamewebApi2, TaskDefinitionwebApi2]]
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+  
+  ContainerSecurityGroupwebApi2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ["", [!Ref AppName, "-ecs-cluster", ContainerSGwebApi2]]
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPortwebApi2
+          ToPort: !Ref ContainerPortwebApi2
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroupwebApi
+
+  ECSServicewebApi2:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ECSCluster
+      - ECSTaskDefinitionwebApi2
+      - ContainerSecurityGroupwebApi2
+      - TargetGroupwebApi2
+      - LoadBalancerListenerwebApi
+      - ListenerRule2
+      
+    Properties:
+      ServiceName: !Ref ServiceNamewebApi2
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinitionwebApi2
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroupwebApi2
+      LoadBalancers:
+        - ContainerName: !Join ['', [!Ref ServiceNamewebApi2, container]]
+          ContainerPort: !Ref ContainerPortwebApi2
+          TargetGroupArn: !Ref TargetGroupwebApi2
+
+
+  
+  
+ 
+  
+
+  
+  ScalingPolicywebApi2:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - "ScalableTargetwebApi2"
+    Properties:
+      PolicyName:
+        !Join ["", [!Ref AppName, !Ref ServiceNamewebApi2, -ecs-auto-scaling-policy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTargetwebApi2
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 75.0
+  
+  ScalableTargetwebApi2:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - "AutoScalingRole"
+      - "ECSServicewebApi2"
+    Properties:
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ResourceId:
+        !Join [
+          "",
+          [service/, !Ref AppName, "-ecs-cluster", /, !Ref ServiceNamewebApi2],
+        ]
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: 1
+      MaxCapacity: 5
+  TargetGroupwebApi2:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ["", [!Ref AppName, !Ref ServiceNamewebApi2, TGwebApi2]]
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPortwebApi2
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckIntervalSeconds: 10
+      # will look for a 200 status code by default unless specified otherwise
+      HealthCheckPath: !Ref HealthCheckPathwebApi2
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300   
+  ListenerRule2:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    DependsOn:
+      - LoadBalancerListenerwebApi
+      - TargetGroupwebApi2
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupwebApi2      
+      ListenerArn: !Ref LoadBalancerListenerwebApi
+      Priority: 2
+      Conditions: 
+        - Field: path-pattern
+          Values:
+            - /Admin
+  LogGroupwebApi2:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ["", [/ecs/, !Ref AppName, !Ref ServiceNamewebApi2, TdefwebApi2]]            
+  #endregion    
+
+Outputs:  
+  LoadBalanceruiDNSName:
+    Value: !GetAtt LoadBalancerui.DNSName     
+    Description: DNSName of the Public Load Balancer
+  LoadBalancerapiDNSName:
+    Value: !GetAtt LoadBalancerwebApi.DNSName    
+    Description: DNSName of the internal Load Balancer   
+  ECSClusterId:
+    Description: The cluster Id
+    Value: !Ref ECSCluster    
